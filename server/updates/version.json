@@ -1,7 +1,7 @@
 {
-  "version": "1.4.6",
-  "versionCode": 13,
-  "changelog": "⚡ P2P Vault v1.4.6 — 100% Real-time Synchronizace Fotografií:\n\n• 🔄 Vyřešena 100% synchronizace fotek mezi zařízeními v reálném čase\n• 📋 Zaveden trvalý cloud manifest (katalog) a obousměrná kontrola chybějících souborů\n• 🔍 Každá fotka je automaticky ověřena na druhém zařízení i na serveru\n• 📥 Automatické stahování chybějících fotek z druhého telefonu do sandboxu\n• 📤 Automatické odeslání lokálních fotek na server, aby je druhý telefon ihned měl\n• 🟢 Zelený indikátor stavu synchronizace v galerii a tlačítko pro okamžité ověření shody\n• 📤 Možnost zkopírovat fotografii z osobní galerie do sdíleného trezoru jedním klepnutím\n• 🗑️ Obousměrné bezpečné mazání fotografií ze zařízení i ze serveru",
+  "version": "1.5.0",
+  "versionCode": 14,
+  "changelog": "🔥 P2P Vault v1.5.0 — Major Architecture & Admin Update:\n\n• 🕵️ Camouflage Admin přihlášení: Admin účet byl skryt z úvodní volby. Přístup probíhá přes Al Negar zadáním Admin hesla, při kterém se celé rozhraní zbarví do karmínově červené barvy.\n• 🗂️ Nová architektura trezoru: Hlavní složkou aplikace je nyní Sdílený trezor. Veškeré nahrávání probíhá přímo do něj a je kdykoli volně přístupné bez nutnosti žádosti o přístup.\n• ⏱️ Žádost o přístup (5–60 min): Slouží výhradně k prohlížení fotografií partnera. Nahrávat nové snímky můžete kdykoli.\n• 🖼️ Moje nahrané fotky: Slouží jako stálý osobní náhled vámi nahraných fotografií do sdíleného trezoru (vždy volně přístupný).\n• 🛡️ Bezpečné mazání přes Admina: Pouze administrátor může přímo smazat média. Běžní uživatelé odesílají žádost o smazání s volitelným důvodem.\n• 🌐 Rozšířený Web Admin Panel: Správa katalogu fotografií a schvalování/zamítání žádostí o smazání přímo ve webovém prohlížeči.\n• 🔍 Vylepšený interaktivní prohlížeč fotek: Pinch-to-zoom gesta, plynulý posun (pan), double-tap přiblížení a swipe navigace mezi všemi snímky.",
   "downloadUrl": "/api/update/download",
-  "publishedAt": "2026-11-12T18:05:00Z"
+  "publishedAt": "2026-11-12T20:30:00Z"
 }

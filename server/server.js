@@ -90,6 +90,25 @@ function savePhotosManifest(manifest) {
   }
 }
 
+// Úložiště žádostí o smazání fotografií
+const DELETE_REQUESTS_FILE = path.join(__dirname, 'delete_requests.json');
+function getDeleteRequests() {
+  if (fs.existsSync(DELETE_REQUESTS_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(DELETE_REQUESTS_FILE, 'utf8'));
+    } catch (_) {}
+  }
+  return [];
+}
+
+function saveDeleteRequests(requests) {
+  try {
+    fs.writeFileSync(DELETE_REQUESTS_FILE, JSON.stringify(requests, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Chyba při ukládání delete_requests.json:', e);
+  }
+}
+
 function isNewerVersion(currentStr, latestStr) {
   if (!currentStr || !latestStr) return false;
   const currentParts = currentStr.replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -352,6 +371,146 @@ app.post('/api/photos/delete', (req, res) => {
 });
 
 // ==============================================================
+// 3c. ŽÁDOSTI O SMAZÁNÍ FOTOGRAFIÍ A VIDEÍ (ADMIN SCHVALOVÁNÍ)
+// ==============================================================
+
+// Žádost uživatele o smazání fotografie (schvaluje admin)
+app.post('/api/photos/request-delete', (req, res) => {
+  const { photoFileName, photoId, requesterId, requesterDisplayName, note } = req.body;
+  if (!photoFileName) return res.status(400).json({ error: 'Chybí photoFileName' });
+
+  const requests = getDeleteRequests();
+  const newReq = {
+    id: 'del_req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+    photoFileName,
+    photoId: photoId || photoFileName.replace('.enc', ''),
+    requesterId: requesterId || 'user_1',
+    requesterDisplayName: requesterDisplayName || 'Uživatel',
+    note: note || '',
+    createdAt: new Date().toISOString(),
+    status: 'pending',
+  };
+
+  requests.unshift(newReq);
+  saveDeleteRequests(requests);
+
+  // Oznámíme adminovi v reálném čase
+  events.push({
+    id: 'evt_del_req_' + Date.now(),
+    time: Date.now(),
+    createdAt: new Date().toISOString(),
+    action_type: 'photo_delete_requested',
+    request: newReq,
+  });
+  stats.totalPublishedEvents++;
+
+  res.json({ success: true, request: newReq });
+});
+
+// Získání všech žádostí o smazání (pro mobilní i webový admin)
+app.get('/api/photos/delete-requests', (req, res) => {
+  res.json({
+    status: 'ok',
+    requests: getDeleteRequests(),
+    serverTime: Date.now(),
+  });
+});
+
+// Admin schválí smazání fotografie -> okamžité trvalé odstranění z cloudu i telefonů
+app.post('/api/photos/approve-delete', (req, res) => {
+  const { requestId } = req.body;
+  const requests = getDeleteRequests();
+  const reqItem = requests.find(r => r.id === requestId);
+  if (!reqItem) return res.status(404).json({ error: 'Žádost nenalezena' });
+
+  reqItem.status = 'approved';
+  reqItem.approvedAt = new Date().toISOString();
+  saveDeleteRequests(requests);
+
+  // Smažeme fyzický soubor
+  const safeName = reqItem.photoFileName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const filePath = path.join(MEDIA_DIR, safeName);
+  if (fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch (_) {}
+  }
+
+  // Smažeme z manifestu
+  let manifest = getPhotosManifest();
+  manifest = manifest.filter(p => p.fileName !== safeName);
+  savePhotosManifest(manifest);
+
+  // Emitujeme photo_deleted událost do všech telefonů
+  events.push({
+    id: 'evt_del_appr_' + Date.now(),
+    time: Date.now(),
+    createdAt: new Date().toISOString(),
+    action_type: 'photo_deleted',
+    fileName: safeName,
+    requestId: requestId,
+  });
+  stats.totalPublishedEvents++;
+
+  res.json({ success: true, message: `Fotografie ${safeName} byla trvale smazána.`, requestId });
+});
+
+// Admin zamítne žádost o smazání
+app.post('/api/photos/reject-delete', (req, res) => {
+  const { requestId } = req.body;
+  const requests = getDeleteRequests();
+  const reqItem = requests.find(r => r.id === requestId);
+  if (!reqItem) return res.status(404).json({ error: 'Žádost nenalezena' });
+
+  reqItem.status = 'rejected';
+  reqItem.rejectedAt = new Date().toISOString();
+  saveDeleteRequests(requests);
+
+  events.push({
+    id: 'evt_del_rej_' + Date.now(),
+    time: Date.now(),
+    createdAt: new Date().toISOString(),
+    action_type: 'photo_delete_rejected',
+    request: reqItem,
+  });
+  stats.totalPublishedEvents++;
+
+  res.json({ success: true, message: 'Žádost o smazání byla zamítnuta.', requestId });
+});
+
+// Admin přímo smaže fotografii (bez nutnosti předchozí žádosti)
+app.post('/api/photos/delete-direct', (req, res) => {
+  const fileName = req.body.fileName || req.body.photoFileName;
+  if (!fileName) return res.status(400).json({ error: 'Chybí název souboru' });
+  const safeName = fileName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const filePath = path.join(MEDIA_DIR, safeName);
+  if (fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch (_) {}
+  }
+  let manifest = getPhotosManifest();
+  manifest = manifest.filter(p => p.fileName !== safeName);
+  savePhotosManifest(manifest);
+
+  const requests = getDeleteRequests();
+  requests.forEach(r => {
+    if (r.photoFileName === safeName && r.status === 'pending') {
+      r.status = 'approved';
+      r.approvedAt = new Date().toISOString();
+    }
+  });
+  saveDeleteRequests(requests);
+
+  events.push({
+    id: 'evt_del_dir_' + Date.now(),
+    time: Date.now(),
+    createdAt: new Date().toISOString(),
+    action_type: 'photo_deleted',
+    fileName: safeName,
+  });
+  stats.totalPublishedEvents++;
+
+  res.json({ success: true, message: `Fotografie ${safeName} byla přímo smazána.` });
+});
+
+// ==============================================================
 // 4. SYSTÉM AUTOMATICKÝCH AKTUALIZACÍ (OTA UPDATES)
 // ==============================================================
 
@@ -485,6 +644,7 @@ app.get('/api/admin/data', checkAdminAuth, (req, res) => {
     versionInfo: getVersionInfo(),
     credentials: getStoredCredentials(),
     photosManifest: getPhotosManifest(),
+    deleteRequests: getDeleteRequests(),
     events: events.slice(-100).reverse(),
   });
 });
@@ -630,6 +790,7 @@ app.post('/api/admin/approve-request', checkAdminAuth, (req, res) => {
 app.post('/api/admin/clear-all', checkAdminAuth, (req, res) => {
   events = [];
   savePhotosManifest([]);
+  saveDeleteRequests([]);
   const files = fs.readdirSync(MEDIA_DIR);
   files.forEach(f => {
     try { fs.unlinkSync(path.join(MEDIA_DIR, f)); } catch (_) {}
@@ -831,6 +992,64 @@ app.get('/admin', (req, res) => {
       <div id="credentials-status-table" style="margin-top: 16px; padding: 12px; background: var(--card-inner); border-radius: 8px; font-size: 12px; color: var(--muted); border: 1px solid var(--border);"></div>
     </div>
 
+    <!-- ŽÁDOSTI O SMAZÁNÍ FOTOGRAFIÍ -->
+    <div class="panel" style="border-color: rgba(239, 68, 68, 0.35);">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>🗑️</span>
+          Žádosti o smazání fotografií a videí
+        </div>
+        <span class="tag tag-amber" id="del-req-count-tag">0 čekajících žádostí</span>
+      </div>
+      <p style="font-size: 13px; color: var(--muted); margin-bottom: 16px;">
+        Uživatelé nemohou mazat fotografie ze sdíleného trezoru přímo. Odesílají žádosti sem pro vaše schválení.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Čas žádosti</th>
+            <th>Žadatel</th>
+            <th>Soubor fotografie</th>
+            <th>Poznámka / Důvod</th>
+            <th>Akce</th>
+          </tr>
+        </thead>
+        <tbody id="del-requests-tbody">
+          <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px;">Žádné čekající žádosti o smazání</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- KATALOG ŠIFROVANÝCH FOTOGRAFIÍ V TREZORU -->
+    <div class="panel" style="border-color: rgba(16, 185, 129, 0.35);">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>📸</span>
+          Katalog šifrovaných fotografií v trezoru
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <span class="tag tag-green" id="photos-count-tag">0 fotografií</span>
+        </div>
+      </div>
+      <p style="font-size: 13px; color: var(--muted); margin-bottom: 16px;">
+        Všechny šifrované soubory v trezoru. Admin je může přímo zkontrolovat, stáhnout nebo trvale smazat.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Název souboru</th>
+            <th>Vlastník</th>
+            <th>Velikost</th>
+            <th>Datum nahrání</th>
+            <th>Akce</th>
+          </tr>
+        </thead>
+        <tbody id="photos-tbody">
+          <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px;">Zatím žádné fotografie v trezoru</td></tr>
+        </tbody>
+      </table>
+    </div>
+
     <!-- AUDIT LOG UDÁLOSTÍ -->
     <div class="panel">
       <div class="panel-header">
@@ -913,6 +1132,58 @@ app.get('/admin', (req, res) => {
             'Al Negar: ' + (u2Changed ? '<span style="color:var(--green);font-weight:bold;">Vlastní heslo uloženo ✓</span>' : '<span style="color:var(--amber);">Výchozí heslo</span>');
         }
 
+        // Žádosti o smazání fotografií
+        const delReqs = data.deleteRequests || [];
+        const pendingDel = delReqs.filter(r => r.status === 'pending');
+        const delTag = document.getElementById('del-req-count-tag');
+        if (delTag) delTag.innerText = pendingDel.length + ' čekajících žádostí';
+        const delTbody = document.getElementById('del-requests-tbody');
+        if (delTbody) {
+          if (pendingDel.length === 0) {
+            delTbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px;">Žádné čekající žádosti o smazání</td></tr>';
+          } else {
+            delTbody.innerHTML = pendingDel.map(r => {
+              const timeStr = new Date(r.createdAt).toLocaleString();
+              return '<tr>' +
+                '<td>' + timeStr + '</td>' +
+                '<td><strong>' + (r.requesterDisplayName || r.requesterId) + '</strong></td>' +
+                '<td><code>' + r.photoFileName + '</code></td>' +
+                '<td>' + (r.note || '—') + '</td>' +
+                '<td>' +
+                  '<button class="btn-action btn-danger" style="margin-right:6px;" onclick="approveDelete(\\'' + r.id + '\\')">Schválit a smazat</button>' +
+                  '<button class="btn-action" onclick="rejectDelete(\\'' + r.id + '\\')">Zamítnout</button>' +
+                '</td>' +
+              '</tr>';
+            }).join('');
+          }
+        }
+
+        // Katalog fotografií v trezoru
+        const photos = data.photosManifest || [];
+        const photosTag = document.getElementById('photos-count-tag');
+        if (photosTag) photosTag.innerText = photos.length + ' fotografií';
+        const photosTbody = document.getElementById('photos-tbody');
+        if (photosTbody) {
+          if (photos.length === 0) {
+            photosTbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px;">Zatím žádné fotografie v trezoru</td></tr>';
+          } else {
+            photosTbody.innerHTML = photos.slice(0, 50).map(p => {
+              const sizeKb = (p.size / 1024).toFixed(1) + ' KB';
+              const dateStr = new Date(p.uploadedAt || p.createdAt).toLocaleString();
+              const uName = p.ownerDisplayName || (p.ownerId === 'user_1' ? 'Panzerkampfwagen VIII Maus' : 'Al Negar');
+              return '<tr>' +
+                '<td><a href="/api/photos/download/' + p.fileName + '" style="color:var(--cyan);text-decoration:none;" download>' + p.fileName + '</a></td>' +
+                '<td><span class="tag ' + (p.ownerId === 'user_1' ? 'tag-blue' : 'tag-purple') + '">' + uName + '</span></td>' +
+                '<td>' + sizeKb + '</td>' +
+                '<td>' + dateStr + '</td>' +
+                '<td>' +
+                  '<button class="btn-action btn-danger" onclick="deletePhotoDirect(\\'' + p.fileName + '\\')">Smazat</button>' +
+                '</td>' +
+              '</tr>';
+            }).join('');
+          }
+        }
+
         // Tabulka
         const tbody = document.getElementById('events-tbody');
         if (!data.events || data.events.length === 0) {
@@ -944,7 +1215,18 @@ app.get('/admin', (req, res) => {
             details = 'Fotografie <strong>' + (p.fileName || e.photo_id || 'Foto') + '</strong> od <strong>' + owner + '</strong> (100% synchronizováno)';
           } else if (e.action_type === 'photo_deleted') {
             typeBadge = '<span class="tag tag-amber">Smazání foto</span>';
-            details = 'Fotografie <strong>' + (e.fileName || '') + '</strong> byla odstraněna.';
+            details = 'Fotografie <strong>' + (e.fileName || '') + '</strong> byla trvale odstraněna.';
+          } else if (e.action_type === 'photo_delete_requested') {
+            typeBadge = '<span class="tag tag-amber">Žádost o smazání</span>';
+            const r = e.request || {};
+            details = '<strong>' + (r.requesterDisplayName || r.requesterId) + '</strong> žádá o smazání <code>' + (r.photoFileName || '') + '</code>' + (r.note ? ' (' + r.note + ')' : '');
+            if (r.status === 'pending') {
+              actionBtn = '<button class="btn-action btn-danger" onclick="approveDelete(\\'' + r.id + '\\')">Schválit</button>';
+            }
+          } else if (e.action_type === 'photo_delete_rejected') {
+            typeBadge = '<span class="tag tag-blue">Smazání zamítnuto</span>';
+            const r = e.request || {};
+            details = 'Žádost o smazání <code>' + (r.photoFileName || '') + '</code> byla zamítnuta.';
           } else if (e.action_type === 'credential_update') {
             const uName = e.user_id === 'user_1' ? 'Panzerkampfwagen VIII Maus' : (e.user_id === 'user_2' ? 'Al Negar' : e.user_id);
             typeBadge = '<span class="tag tag-amber">Změna hesla</span>';
@@ -1062,6 +1344,65 @@ app.get('/admin', (req, res) => {
         body: JSON.stringify({ requestId: id, durationMinutes: mins })
       });
       loadData();
+    }
+
+    async function approveDelete(reqId) {
+      if (!confirm('Opravdu chcete schválit tuto žádost a trvale smazat fotografii ze serveru i všech telefonů?')) return;
+      try {
+        const res = await fetch('/api/photos/approve-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+          body: JSON.stringify({ requestId: reqId })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          alert('✓ Fotografie byla úspěšně smazána.');
+          loadData();
+        } else {
+          alert('Chyba: ' + (d.error || 'Neznámá chyba'));
+        }
+      } catch (e) {
+        alert('Chyba spojení: ' + e);
+      }
+    }
+
+    async function rejectDelete(reqId) {
+      if (!confirm('Opravdu chcete zamítnout tuto žádost o smazání?')) return;
+      try {
+        const res = await fetch('/api/photos/reject-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+          body: JSON.stringify({ requestId: reqId })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          loadData();
+        } else {
+          alert('Chyba: ' + (d.error || 'Neznámá chyba'));
+        }
+      } catch (e) {
+        alert('Chyba spojení: ' + e);
+      }
+    }
+
+    async function deletePhotoDirect(fileName) {
+      if (!confirm('Opravdu chcete TRVALE smazat fotografii "' + fileName + '" ze sdíleného trezoru a všech telefonů?')) return;
+      try {
+        const res = await fetch('/api/photos/delete-direct', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+          body: JSON.stringify({ fileName: fileName })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          alert('✓ Fotografie ' + fileName + ' byla trvale odstraněna.');
+          loadData();
+        } else {
+          alert('Chyba: ' + (d.error || 'Neznámá chyba'));
+        }
+      } catch (e) {
+        alert('Chyba spojení: ' + e);
+      }
     }
 
     async function clearAll() {
