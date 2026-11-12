@@ -1,1 +1,7 @@
-{"version":"1.4.4","versionCode":1794498659,"changelog":"Aktualizace P2P Vault v1.4.4","downloadUrl":"/api/update/download","publishedAt":"2026-11-12T15:50:59Z"}
+{
+  "version": "1.4.5",
+  "versionCode": 12,
+  "changelog": "🛡️ P2P Vault v1.4.5 — Velká aktualizace zabezpečení a vzhledu:\n\n• 📸 Oprava nahrávání do 'Moje nahrané fotky' (vyřešeno parsování ID uživatelů)\n• 🔒 Zabezpečení změny adresy serveru: Editace URL i párovacího kanálu je uzamčena a vyžaduje zadání hesla administrátora (ping zůstává volný pro rychlé ověření)\n• 🙈 Skryto heslo administrátora z kolonek a textů nastavení serveru\n• 🔴 Nový vizuál administrátora v energické červené barvě (#EF4444)\n• 🔑 Okamžité skrytí výchozích tlačítek hesel jakmile si uživatel nastaví vlastní heslo\n• 🛡️ Nová moderní ikona zámku s purpurovým a červeným zářením bez rušivého kruhového pozadí\n• 🌐 Obousměrná cloudová synchronizace hesel mezi zařízeními i z webové administrace\n• 📜 Patch notes přehledně zobrazené v aktualizačním okně",
+  "downloadUrl": "/api/update/download",
+  "publishedAt": "2026-11-12T17:35:00Z"
+}

@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const HOST = process.env.HOST || '0.0.0.0';
@@ -43,6 +44,31 @@ function getVersionInfo() {
 
 function saveVersionInfo(info) {
   fs.writeFileSync(VERSION_FILE, JSON.stringify(info, null, 2), 'utf8');
+}
+
+// Úložiště synchronizovaných hesel uživatelů
+const CREDENTIALS_FILE = path.join(__dirname, 'credentials_store.json');
+function getStoredCredentials() {
+  if (fs.existsSync(CREDENTIALS_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
+    } catch (_) {}
+  }
+  return {};
+}
+
+function saveStoredCredentials(creds) {
+  try {
+    fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(creds, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Chyba při ukládání credentials_store.json:', e);
+  }
+}
+
+function hashPasswordWithSalt(password, saltBuffer) {
+  return crypto.createHash('sha256')
+    .update(Buffer.concat([Buffer.from(password, 'utf8'), saltBuffer]))
+    .digest('hex');
 }
 
 function isNewerVersion(currentStr, latestStr) {
@@ -223,6 +249,56 @@ app.get('/api/update/download', (req, res) => {
 });
 
 // ==============================================================
+// 4b. SYNCHRONIZACE UŽIVATELSKÝCH HESEL (CLOUD PASSWORDS)
+// ==============================================================
+
+app.get('/api/credentials/sync', (req, res) => {
+  const creds = getStoredCredentials();
+  res.json({
+    status: 'ok',
+    credentials: creds,
+    serverTime: Date.now(),
+  });
+});
+
+app.post('/api/credentials/update', (req, res) => {
+  const { user_id, hash, salt, has_changed, updated_at } = req.body || {};
+  if (!user_id || !hash || !salt) {
+    return res.status(400).json({ error: 'Chybí user_id, hash nebo salt' });
+  }
+
+  const creds = getStoredCredentials();
+  const existing = creds[user_id];
+  const newUpdatedAt = updated_at || Date.now();
+
+  if (!existing || (existing.updated_at || 0) <= newUpdatedAt) {
+    creds[user_id] = {
+      hash,
+      salt,
+      has_changed: has_changed !== false,
+      updated_at: newUpdatedAt,
+    };
+    saveStoredCredentials(creds);
+  }
+
+  const evt = {
+    id: 'cred_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+    timestamp: Date.now(),
+    time: new Date().toISOString(),
+    action_type: 'credential_update',
+    user_id: user_id,
+    hash: hash,
+    salt: salt,
+    has_changed: has_changed !== false,
+    updated_at: newUpdatedAt,
+  };
+  events.push(evt);
+  stats.totalPublishedEvents++;
+
+  res.json({ success: true, updated_at: newUpdatedAt });
+});
+
+// ==============================================================
 // 5. WEBOVÝ ADMIN PANEL (/admin) A ADMIN API
 // ==============================================================
 
@@ -257,7 +333,51 @@ app.get('/api/admin/data', checkAdminAuth, (req, res) => {
       apkSizeMb,
     },
     versionInfo: getVersionInfo(),
+    credentials: getStoredCredentials(),
     events: events.slice(-100).reverse(),
+  });
+});
+
+// Admin vzdálené nastavení hesla uživatele z webu
+app.post('/api/admin/set-user-password', checkAdminAuth, (req, res) => {
+  const { userId, newPassword } = req.body || {};
+  if (!userId || !newPassword || newPassword.length < 4) {
+    return res.status(400).json({ error: 'Zadejte platné userId a heslo o délce alespoň 4 znaky.' });
+  }
+
+  const saltBuf = crypto.randomBytes(16);
+  const saltB64 = saltBuf.toString('base64');
+  const hash = hashPasswordWithSalt(newPassword, saltBuf);
+  const now = Date.now();
+
+  const creds = getStoredCredentials();
+  creds[userId] = {
+    hash: hash,
+    salt: saltB64,
+    has_changed: true,
+    updated_at: now,
+  };
+  saveStoredCredentials(creds);
+
+  const userName = userId === 'user_1' ? 'Panzerkampfwagen VIII Maus' : (userId === 'user_2' ? 'Al Negar' : userId);
+
+  const evt = {
+    id: 'cred_' + now + '_' + Math.random().toString(36).substr(2, 6),
+    timestamp: now,
+    time: new Date().toISOString(),
+    action_type: 'credential_update',
+    user_id: userId,
+    hash: hash,
+    salt: saltB64,
+    has_changed: true,
+    updated_at: now,
+  };
+  events.push(evt);
+  stats.totalPublishedEvents++;
+
+  res.json({
+    success: true,
+    message: `Heslo pro uživatele "${userName}" bylo úspěšně změněno a synchronizováno se všemi zařízeními.`,
   });
 });
 
@@ -522,6 +642,43 @@ app.get('/admin', (req, res) => {
       </div>
     </div>
 
+    <!-- SPRÁVA A SYNCHRONIZACE HESEL -->
+    <div class="panel" style="border-color: rgba(168, 85, 247, 0.35);">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>🔑</span>
+          Správa a synchronizace uživatelských hesel
+        </div>
+        <span class="tag tag-purple">Okamžitá distribuce do všech zařízení</span>
+      </div>
+      <p style="font-size: 13px; color: var(--muted); margin-bottom: 16px;">
+        Zde můžete na dálku nastavit nebo resetovat přístupové heslo pro kteréhokoliv uživatele. Změna se okamžitě uloží na serveru a rozešle do všech připojených aplikací, kde nahradí původní heslo.
+      </p>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+        <div>
+          <label style="font-size:12px; font-weight:bold; color:var(--text);">Vyberte uživatele:</label>
+          <select id="cred-user-select" style="width:100%; background:var(--card-inner); border:1px solid var(--border); color:white; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:6px; margin-bottom:12px;">
+            <option value="user_1">Panzerkampfwagen VIII Maus (Uživatel 1)</option>
+            <option value="user_2">Al Negar (Uživatel 2)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:bold; color:var(--text);">Nové přístupové heslo:</label>
+          <input type="text" id="cred-new-password" placeholder="Zadejte nové heslo (min. 4 znaky)">
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <button class="btn-action btn-green" onclick="setUserPassword()" style="padding: 10px 20px;">
+          💾 Uložit nové heslo a synchronizovat
+        </button>
+        <span id="cred-status-msg" style="font-size:12px; color:var(--cyan);"></span>
+      </div>
+
+      <div id="credentials-status-table" style="margin-top: 16px; padding: 12px; background: var(--card-inner); border-radius: 8px; font-size: 12px; color: var(--muted); border: 1px solid var(--border);"></div>
+    </div>
+
     <!-- AUDIT LOG UDÁLOSTÍ -->
     <div class="panel">
       <div class="panel-header">
@@ -593,6 +750,17 @@ app.get('/admin', (req, res) => {
         document.getElementById('stat-version').innerText = 'v' + (vInfo.version || '1.4.1');
         document.getElementById('stat-apk-status').innerText = s.apkExists ? 'APK (' + s.apkSizeMb + ' MB) připraveno' : 'APK zatím nenahráno';
 
+        // Stav hesel
+        const creds = data.credentials || {};
+        const credDiv = document.getElementById('credentials-status-table');
+        if (credDiv) {
+          const u1Changed = creds.user_1 && creds.user_1.has_changed;
+          const u2Changed = creds.user_2 && creds.user_2.has_changed;
+          credDiv.innerHTML = '<strong>Aktuální stav hesel:</strong> &nbsp;&nbsp;' +
+            'Panzerkampfwagen VIII Maus: ' + (u1Changed ? '<span style="color:var(--green);font-weight:bold;">Vlastní heslo uloženo ✓</span>' : '<span style="color:var(--amber);">Výchozí heslo</span>') + ' &nbsp;|&nbsp; ' +
+            'Al Negar: ' + (u2Changed ? '<span style="color:var(--green);font-weight:bold;">Vlastní heslo uloženo ✓</span>' : '<span style="color:var(--amber);">Výchozí heslo</span>');
+        }
+
         // Tabulka
         const tbody = document.getElementById('events-tbody');
         if (!data.events || data.events.length === 0) {
@@ -620,6 +788,10 @@ app.get('/admin', (req, res) => {
           } else if (e.action_type === 'shared_photo_uploaded') {
             typeBadge = '<span class="tag tag-green">Sdílená fotka</span>';
             details = 'Nahrál <strong>' + e.owner_name + '</strong> (ID: ' + e.photo_id + ')';
+          } else if (e.action_type === 'credential_update') {
+            const uName = e.user_id === 'user_1' ? 'Panzerkampfwagen VIII Maus' : (e.user_id === 'user_2' ? 'Al Negar' : e.user_id);
+            typeBadge = '<span class="tag tag-amber">Změna hesla</span>';
+            details = 'Uživatel <strong>' + uName + '</strong> má aktualizované heslo (synchronizováno do všech zařízení).';
           } else if (e.action_type === 'app_update_available') {
             typeBadge = '<span class="tag tag-purple">Nová aktualizace v' + e.version + '</span>';
             details = 'Changelog: ' + (e.changelog || 'Nová verze');
@@ -630,6 +802,39 @@ app.get('/admin', (req, res) => {
         }).join('');
       } catch (err) {
         console.error(err);
+      }
+    }
+
+    async function setUserPassword() {
+      const userId = document.getElementById('cred-user-select').value;
+      const newPassword = document.getElementById('cred-new-password').value.trim();
+      const statusMsg = document.getElementById('cred-status-msg');
+
+      if (!newPassword || newPassword.length < 4) {
+        alert('Zadejte prosím heslo o délce alespoň 4 znaky.');
+        return;
+      }
+
+      const userName = userId === 'user_1' ? 'Panzerkampfwagen VIII Maus' : 'Al Negar';
+      if (!confirm('Opravdu chcete nastavit nové heslo pro uživatele "' + userName + '" a odeslat ho do všech zařízení?')) return;
+
+      statusMsg.innerText = 'Ukládám a rozesílám heslo...';
+      try {
+        const res = await fetch('/api/admin/set-user-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+          body: JSON.stringify({ userId: userId, newPassword: newPassword })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          statusMsg.innerText = '✓ ' + d.message;
+          document.getElementById('cred-new-password').value = '';
+          loadData();
+        } else {
+          statusMsg.innerText = 'Chyba: ' + (d.error || 'Neznámá chyba');
+        }
+      } catch (e) {
+        statusMsg.innerText = 'Chyba: ' + e;
       }
     }
 
