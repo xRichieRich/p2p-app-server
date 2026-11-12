@@ -1,7 +1,7 @@
 {
-  "version": "1.4.5",
-  "versionCode": 12,
-  "changelog": "🛡️ P2P Vault v1.4.5 — Velká aktualizace zabezpečení a vzhledu:\n\n• 📸 Oprava nahrávání do 'Moje nahrané fotky' (vyřešeno parsování ID uživatelů)\n• 🔒 Zabezpečení změny adresy serveru: Editace URL i párovacího kanálu je uzamčena a vyžaduje zadání hesla administrátora (ping zůstává volný pro rychlé ověření)\n• 🙈 Skryto heslo administrátora z kolonek a textů nastavení serveru\n• 🔴 Nový vizuál administrátora v energické červené barvě (#EF4444)\n• 🔑 Okamžité skrytí výchozích tlačítek hesel jakmile si uživatel nastaví vlastní heslo\n• 🛡️ Nová moderní ikona zámku s purpurovým a červeným zářením bez rušivého kruhového pozadí\n• 🌐 Obousměrná cloudová synchronizace hesel mezi zařízeními i z webové administrace\n• 📜 Patch notes přehledně zobrazené v aktualizačním okně",
+  "version": "1.4.6",
+  "versionCode": 13,
+  "changelog": "⚡ P2P Vault v1.4.6 — 100% Real-time Synchronizace Fotografií:\n\n• 🔄 Vyřešena 100% synchronizace fotek mezi zařízeními v reálném čase\n• 📋 Zaveden trvalý cloud manifest (katalog) a obousměrná kontrola chybějících souborů\n• 🔍 Každá fotka je automaticky ověřena na druhém zařízení i na serveru\n• 📥 Automatické stahování chybějících fotek z druhého telefonu do sandboxu\n• 📤 Automatické odeslání lokálních fotek na server, aby je druhý telefon ihned měl\n• 🟢 Zelený indikátor stavu synchronizace v galerii a tlačítko pro okamžité ověření shody\n• 📤 Možnost zkopírovat fotografii z osobní galerie do sdíleného trezoru jedním klepnutím\n• 🗑️ Obousměrné bezpečné mazání fotografií ze zařízení i ze serveru",
   "downloadUrl": "/api/update/download",
-  "publishedAt": "2026-11-12T17:35:00Z"
+  "publishedAt": "2026-11-12T18:05:00Z"
 }

@@ -71,6 +71,25 @@ function hashPasswordWithSalt(password, saltBuffer) {
     .digest('hex');
 }
 
+// Úložiště katalogu šifrovaných fotografií (Persistent Photo Vault Manifest)
+const PHOTOS_MANIFEST_FILE = path.join(__dirname, 'photos_manifest.json');
+function getPhotosManifest() {
+  if (fs.existsSync(PHOTOS_MANIFEST_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(PHOTOS_MANIFEST_FILE, 'utf8'));
+    } catch (_) {}
+  }
+  return [];
+}
+
+function savePhotosManifest(manifest) {
+  try {
+    fs.writeFileSync(PHOTOS_MANIFEST_FILE, JSON.stringify(manifest, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Chyba při ukládání photos_manifest.json:', e);
+  }
+}
+
 function isNewerVersion(currentStr, latestStr) {
   if (!currentStr || !latestStr) return false;
   const currentParts = currentStr.replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -199,6 +218,137 @@ app.get('/api/media/:mediaId', (req, res) => {
   } else {
     res.status(404).json({ error: 'Médiální soubor nenalezen' });
   }
+});
+
+// ==============================================================
+// 3b. 100% REAL-TIME SYNCHRONIZACE ŠIFROVANÝCH FOTOGRAFIÍ
+// ==============================================================
+
+// Vrátí manifest všech existujících fotografií v trezoru
+app.get('/api/photos/manifest', (req, res) => {
+  const manifest = getPhotosManifest();
+  // Ověříme, zda soubory na disku fyzicky existují
+  const verified = manifest.filter(item => {
+    const fPath = path.join(MEDIA_DIR, item.fileName);
+    return fs.existsSync(fPath);
+  });
+  if (verified.length !== manifest.length) {
+    savePhotosManifest(verified);
+  }
+
+  res.json({
+    status: 'ok',
+    photos: verified,
+    count: verified.length,
+    serverTime: Date.now(),
+  });
+});
+
+// Nahrání nové nebo chybějící fotografie do trezoru s okamžitou notifikací
+app.post('/api/photos/upload', (req, res) => {
+  const {
+    fileName,
+    photoId,
+    ownerId,
+    ownerDisplayName,
+    isShared,
+    createdAt,
+    encryptedBase64,
+  } = req.body;
+
+  if (!fileName || !encryptedBase64) {
+    return res.status(400).json({ error: 'Chybí fileName nebo encryptedBase64' });
+  }
+
+  try {
+    const safeName = fileName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const filePath = path.join(MEDIA_DIR, safeName);
+    const buffer = Buffer.from(encryptedBase64, 'base64');
+    fs.writeFileSync(filePath, buffer);
+    stats.totalMediaUploaded++;
+
+    const now = Date.now();
+    const manifest = getPhotosManifest();
+    const existingIndex = manifest.findIndex(p => p.fileName === safeName);
+
+    const photoMeta = {
+      fileName: safeName,
+      photoId: photoId || safeName.replace('.enc', ''),
+      ownerId: ownerId || 'user_1',
+      ownerDisplayName: ownerDisplayName || (ownerId === 'user_1' ? 'Panzerkampfwagen VIII Maus' : 'Al Negar'),
+      isShared: isShared !== false,
+      size: buffer.length,
+      createdAt: createdAt || now,
+      uploadedAt: now,
+    };
+
+    if (existingIndex >= 0) {
+      manifest[existingIndex] = photoMeta;
+    } else {
+      manifest.unshift(photoMeta);
+    }
+    savePhotosManifest(manifest);
+
+    // Vyšleme push událost pro okamžitou synchronizaci v reálném čase
+    const evt = {
+      id: 'photo_sync_' + now + '_' + Math.random().toString(36).substring(2, 7),
+      time: now,
+      createdAt: new Date().toISOString(),
+      action_type: 'photo_catalog_updated',
+      photo: photoMeta,
+    };
+    events.push(evt);
+    stats.totalPublishedEvents++;
+
+    res.json({
+      success: true,
+      fileName: safeName,
+      size: buffer.length,
+      manifestCount: manifest.length,
+    });
+  } catch (err) {
+    console.error('Chyba při uploadu fotky:', err);
+    res.status(500).json({ error: 'Chyba při ukládání fotografie: ' + err.message });
+  }
+});
+
+// Stažení šifrované fotografie
+app.get('/api/photos/download/:fileName', (req, res) => {
+  const safeName = req.params.fileName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const filePath = path.join(MEDIA_DIR, safeName);
+
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    fs.createReadStream(filePath).pipe(res);
+  } else {
+    res.status(404).json({ error: 'Fotografie nebyla nalezena' });
+  }
+});
+
+// Smazání fotografie
+app.post('/api/photos/delete', (req, res) => {
+  const { fileName } = req.body;
+  if (!fileName) return res.status(400).json({ error: 'Chybí fileName' });
+
+  const safeName = fileName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const filePath = path.join(MEDIA_DIR, safeName);
+  if (fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch (_) {}
+  }
+
+  let manifest = getPhotosManifest();
+  manifest = manifest.filter(p => p.fileName !== safeName);
+  savePhotosManifest(manifest);
+
+  events.push({
+    id: 'photo_del_' + Date.now(),
+    time: Date.now(),
+    action_type: 'photo_deleted',
+    fileName: safeName,
+  });
+
+  res.json({ success: true, fileName: safeName });
 });
 
 // ==============================================================
@@ -334,6 +484,7 @@ app.get('/api/admin/data', checkAdminAuth, (req, res) => {
     },
     versionInfo: getVersionInfo(),
     credentials: getStoredCredentials(),
+    photosManifest: getPhotosManifest(),
     events: events.slice(-100).reverse(),
   });
 });
@@ -478,6 +629,7 @@ app.post('/api/admin/approve-request', checkAdminAuth, (req, res) => {
 // Admin vymazání dat z webu
 app.post('/api/admin/clear-all', checkAdminAuth, (req, res) => {
   events = [];
+  savePhotosManifest([]);
   const files = fs.readdirSync(MEDIA_DIR);
   files.forEach(f => {
     try { fs.unlinkSync(path.join(MEDIA_DIR, f)); } catch (_) {}
@@ -785,9 +937,14 @@ app.get('/admin', (req, res) => {
             const m = e.message || {};
             typeBadge = '<span class="tag tag-blue">Zpráva v chatu</span>';
             details = 'Od <strong>' + (m.senderDisplayName || m.senderId) + '</strong>: ' + (m.text || '[' + m.type + ']');
-          } else if (e.action_type === 'shared_photo_uploaded') {
-            typeBadge = '<span class="tag tag-green">Sdílená fotka</span>';
-            details = 'Nahrál <strong>' + e.owner_name + '</strong> (ID: ' + e.photo_id + ')';
+          } else if (e.action_type === 'shared_photo_uploaded' || e.action_type === 'photo_catalog_updated') {
+            typeBadge = '<span class="tag tag-green">Foto v trezoru</span>';
+            const p = e.photo || {};
+            const owner = p.ownerDisplayName || e.owner_name || 'Uživatel';
+            details = 'Fotografie <strong>' + (p.fileName || e.photo_id || 'Foto') + '</strong> od <strong>' + owner + '</strong> (100% synchronizováno)';
+          } else if (e.action_type === 'photo_deleted') {
+            typeBadge = '<span class="tag tag-amber">Smazání foto</span>';
+            details = 'Fotografie <strong>' + (e.fileName || '') + '</strong> byla odstraněna.';
           } else if (e.action_type === 'credential_update') {
             const uName = e.user_id === 'user_1' ? 'Panzerkampfwagen VIII Maus' : (e.user_id === 'user_2' ? 'Al Negar' : e.user_id);
             typeBadge = '<span class="tag tag-amber">Změna hesla</span>';
