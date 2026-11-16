@@ -645,6 +645,14 @@ app.get('/api/admin/data', checkAdminAuth, (req, res) => {
     credentials: getStoredCredentials(),
     photosManifest: getPhotosManifest(),
     deleteRequests: getDeleteRequests(),
+    diagnostics: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      heapUsedMb: (process.memoryUsage().heapUsed / (1024 * 1024)).toFixed(1),
+      heapTotalMb: (process.memoryUsage().heapTotal / (1024 * 1024)).toFixed(1),
+      rssMb: (process.memoryUsage().rss / (1024 * 1024)).toFixed(1),
+    },
     events: events.slice(-100).reverse(),
   });
 });
@@ -798,6 +806,73 @@ app.post('/api/admin/clear-all', checkAdminAuth, (req, res) => {
   res.json({ success: true, message: 'Veškerá data a média na serveru byla vymazána.' });
 });
 
+// Admin vyslání systémového oznámení / výstrahy na všechny telefony (v2.0)
+app.post('/api/admin/broadcast-announcement', checkAdminAuth, (req, res) => {
+  const { message, urgency, sender } = req.body || {};
+  if (!message || message.trim().length === 0) {
+    return res.status(400).json({ error: 'Zpráva oznámení nesmí být prázdná.' });
+  }
+
+  const evt = {
+    id: 'ann_' + Date.now(),
+    time: Date.now(),
+    createdAt: new Date().toISOString(),
+    action_type: 'system_announcement',
+    message: message.trim(),
+    urgency: urgency || 'warning',
+    sender: sender || 'Administrátor',
+  };
+  events.push(evt);
+  stats.totalPublishedEvents++;
+
+  res.json({ success: true, message: 'Oznámení bylo odesláno na všechny připojené telefony.', announcement: evt });
+});
+
+// Admin nouzové uzamčení všech aktivních relací (Emergency Lock v2.0)
+app.post('/api/admin/emergency-lock', checkAdminAuth, (req, res) => {
+  const evt = {
+    id: 'emerg_lock_' + Date.now(),
+    time: Date.now(),
+    createdAt: new Date().toISOString(),
+    action_type: 'emergency_lock',
+  };
+  events.push(evt);
+  stats.totalPublishedEvents++;
+
+  res.json({ success: true, message: 'Nouzové uzamčení bylo odesláno. Veškeré aktivní přístupy byly odvolány.' });
+});
+
+// Admin vyčištění sirotčích souborů a kontrola integrity úložiště (v2.0)
+app.post('/api/admin/clean-orphans', checkAdminAuth, (req, res) => {
+  try {
+    const files = fs.readdirSync(MEDIA_DIR);
+    let manifest = getPhotosManifest();
+    const manifestNames = new Set(manifest.map(p => p.fileName));
+    let cleanedCount = 0;
+
+    files.forEach(f => {
+      if (f.endsWith('.enc') && !manifestNames.has(f)) {
+        try {
+          fs.unlinkSync(path.join(MEDIA_DIR, f));
+          cleanedCount++;
+        } catch (_) {}
+      }
+    });
+
+    manifest = manifest.filter(p => fs.existsSync(path.join(MEDIA_DIR, p.fileName)));
+    savePhotosManifest(manifest);
+
+    res.json({
+      success: true,
+      cleanedCount,
+      totalPhotos: manifest.length,
+      message: `Vyčištěno ${cleanedCount} sirotčích souborů. V katalogu je ${manifest.length} platných médií.`
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Chyba při čištění: ' + e });
+  }
+});
+
 // Webová stránka Admin Panelu
 app.get('/admin', (req, res) => {
   res.send(`
@@ -910,9 +985,44 @@ app.get('/admin', (req, res) => {
         <div class="stat-sub" id="stat-media-count">0 souborů</div>
       </div>
       <div class="stat-card">
+        <div class="stat-label">Telemetrie paměti</div>
+        <div class="stat-value" style="color:var(--green);" id="stat-telemetry">0 MB</div>
+        <div class="stat-sub">Heap V2.0 Engine</div>
+      </div>
+      <div class="stat-card">
         <div class="stat-label">Aktuální verze APK</div>
-        <div class="stat-value" style="color:var(--cyan);" id="stat-version">v1.4.1</div>
+        <div class="stat-value" style="color:var(--cyan);" id="stat-version">v2.0.0</div>
         <div class="stat-sub" id="stat-apk-status">K dispozici ke stažení</div>
+      </div>
+    </div>
+
+    <!-- KRIZOVÉ ŘÍZENÍ A HROMADNÉ VÝSTRAHY (v2.0) -->
+    <div class="panel" style="border-color: rgba(239, 68, 68, 0.45); background: linear-gradient(180deg, #161024 0%, #111827 100%);">
+      <div class="panel-header">
+        <div class="panel-title" style="color:#FCA5A5;">
+          <span>🚨</span>
+          Krizové řízení a hromadné výstrahy (Verze 2.0)
+        </div>
+        <span class="tag tag-amber" id="crisis-badge">Okamžitý push do všech telefonů</span>
+      </div>
+      <p style="font-size: 13px; color: var(--muted); margin-bottom: 14px;">
+        Zde můžete odeslat okamžitou systémovou výstrahu na všechny připojené telefony, nouzově odvolat veškerý aktivní přístup ke sdílenému trezoru (Emergency Lock) nebo spustit automatického správce úložiště.
+      </p>
+
+      <label style="font-size:12px; font-weight:bold; color:var(--text);">Text systémové zprávy / výstrahy:</label>
+      <input type="text" id="broadcast-msg" placeholder="Např. Pozor: Plánovaná bezpečnostní údržba dnes ve 23:00 nebo Zkontrolujte trezor..." style="margin-bottom:12px;">
+
+      <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+        <button class="btn-action btn-green" onclick="sendBroadcastAnnouncement()" style="padding: 10px 18px;">
+          📢 Odeslat výstrahu na telefony
+        </button>
+        <button class="btn-action btn-danger" onclick="sendEmergencyLock()" style="padding: 10px 18px;">
+          🔒 Nouzově uzamknout všechny aktivní přístupy
+        </button>
+        <button class="btn-action" onclick="cleanOrphanFiles()" style="padding: 10px 18px; border-color: var(--cyan); color: var(--cyan);">
+          🧹 Vyčistit sirotčí soubory (Storage Janitor)
+        </button>
+        <span id="crisis-status" style="font-size:12px; color:var(--cyan); margin-left:8px; font-weight:bold;"></span>
       </div>
     </div>
 
@@ -1062,6 +1172,16 @@ app.get('/admin', (req, res) => {
           <button class="btn-action btn-danger" onclick="clearAll()">Vymazat log</button>
         </div>
       </div>
+
+      <!-- Filtrovací tlačítka pro audit log -->
+      <div style="display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;">
+        <button class="btn-action btn-green" id="filter-all" onclick="setEventFilter('all')">Všechny události</button>
+        <button class="btn-action" id="filter-access" onclick="setEventFilter('access')">Žádosti o přístup</button>
+        <button class="btn-action" id="filter-photos" onclick="setEventFilter('photos')">Fotografie</button>
+        <button class="btn-action" id="filter-delete" onclick="setEventFilter('delete')">Smazání & Žádosti</button>
+        <button class="btn-action" id="filter-creds" onclick="setEventFilter('creds')">Změny hesel</button>
+        <button class="btn-action" id="filter-alerts" onclick="setEventFilter('alerts')">Výstrahy & Nouze</button>
+      </div>
       <table>
         <thead>
           <tr>
@@ -1116,9 +1236,18 @@ app.get('/admin', (req, res) => {
         document.getElementById('stat-media').innerText = (s.mediaTotalMb || 0) + ' MB';
         document.getElementById('stat-media-count').innerText = (s.mediaCount || 0) + ' souborů';
         
+        // Telemetrie paměti
+        if (data.diagnostics) {
+          const d = data.diagnostics;
+          const diagElem = document.getElementById('stat-telemetry');
+          if (diagElem) {
+            diagElem.innerText = d.heapUsedMb + ' MB / ' + d.heapTotalMb + ' MB';
+          }
+        }
+
         // Verze
         const vInfo = data.versionInfo || {};
-        document.getElementById('stat-version').innerText = 'v' + (vInfo.version || '1.4.1');
+        document.getElementById('stat-version').innerText = 'v' + (vInfo.version || '2.0.0');
         document.getElementById('stat-apk-status').innerText = s.apkExists ? 'APK (' + s.apkSizeMb + ' MB) připraveno' : 'APK zatím nenahráno';
 
         // Stav hesel
@@ -1186,12 +1315,25 @@ app.get('/admin', (req, res) => {
 
         // Tabulka
         const tbody = document.getElementById('events-tbody');
-        if (!data.events || data.events.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px;">Zatím žádné zaznamenané události</td></tr>';
+        let allEvts = data.events || [];
+        if (currentEventFilter === 'access') {
+          allEvts = allEvts.filter(e => e.action_type === 'access_request' || e.action_type === 'access_approved' || e.action_type === 'access_denied');
+        } else if (currentEventFilter === 'photos') {
+          allEvts = allEvts.filter(e => e.action_type === 'shared_photo_uploaded' || e.action_type === 'photo_catalog_updated');
+        } else if (currentEventFilter === 'delete') {
+          allEvts = allEvts.filter(e => e.action_type && e.action_type.includes('delete'));
+        } else if (currentEventFilter === 'creds') {
+          allEvts = allEvts.filter(e => e.action_type === 'credential_update');
+        } else if (currentEventFilter === 'alerts') {
+          allEvts = allEvts.filter(e => e.action_type === 'system_announcement' || e.action_type === 'emergency_lock');
+        }
+
+        if (allEvts.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px;">Žádné zaznamenané události pro zvolený filtr</td></tr>';
           return;
         }
 
-        tbody.innerHTML = data.events.map(e => {
+        tbody.innerHTML = allEvts.map(e => {
           let typeBadge = '<span class="tag tag-blue">' + e.action_type + '</span>';
           let details = '';
           let actionBtn = '';
@@ -1234,6 +1376,12 @@ app.get('/admin', (req, res) => {
           } else if (e.action_type === 'app_update_available') {
             typeBadge = '<span class="tag tag-purple">Nová aktualizace v' + e.version + '</span>';
             details = 'Changelog: ' + (e.changelog || 'Nová verze');
+          } else if (e.action_type === 'system_announcement') {
+            typeBadge = '<span class="tag tag-amber" style="background:rgba(245,158,11,0.25);">Systémová výstraha</span>';
+            details = '<strong>' + (e.sender || 'Admin') + '</strong>: ' + (e.message || '');
+          } else if (e.action_type === 'emergency_lock') {
+            typeBadge = '<span class="tag tag-amber" style="background:rgba(239,68,68,0.25);color:var(--red);">Nouzové uzamčení</span>';
+            details = 'Administrátor nouzově odvolal přístup ke sdílenému trezoru.';
           }
 
           const timeStr = new Date(e.time || e.createdAt).toLocaleTimeString();
@@ -1412,6 +1560,89 @@ app.get('/admin', (req, res) => {
         headers: { 'x-admin-key': adminKey }
       });
       loadData();
+    }
+
+    let currentEventFilter = 'all';
+    function setEventFilter(f) {
+      currentEventFilter = f;
+      ['all', 'access', 'photos', 'delete', 'creds', 'alerts'].forEach(k => {
+        const btn = document.getElementById('filter-' + k);
+        if (btn) {
+          btn.className = (k === f) ? 'btn-action btn-green' : 'btn-action';
+        }
+      });
+      loadData();
+    }
+
+    async function sendBroadcastAnnouncement() {
+      const msg = document.getElementById('broadcast-msg').value.trim();
+      const status = document.getElementById('crisis-status');
+      if (!msg) {
+        alert('Zadejte text oznámení.');
+        return;
+      }
+      if (!confirm('Opravdu odeslat toto oznámení jako okamžitou výstrahu na všechny připojené telefony?')) return;
+      status.innerText = 'Odesílám...';
+      try {
+        const res = await fetch('/api/admin/broadcast-announcement', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+          body: JSON.stringify({ message: msg, sender: 'Administrátor (Web)' })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          status.innerText = '✓ Výstraha odeslána!';
+          document.getElementById('broadcast-msg').value = '';
+          loadData();
+        } else {
+          status.innerText = 'Chyba: ' + d.error;
+        }
+      } catch (e) {
+        status.innerText = 'Chyba spojení: ' + e;
+      }
+    }
+
+    async function sendEmergencyLock() {
+      const status = document.getElementById('crisis-status');
+      if (!confirm('VAROVÁNÍ: Opravdu chcete okamžitě NOUZOVĚ UZAMKNOUT všechny přístupy ke sdílenému trezoru na všech telefonech?')) return;
+      status.innerText = 'Vysílám nouzový zámek...';
+      try {
+        const res = await fetch('/api/admin/emergency-lock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }
+        });
+        const d = await res.json();
+        if (res.ok) {
+          status.innerText = '✓ Nouzový zámek aktivován!';
+          loadData();
+        } else {
+          status.innerText = 'Chyba: ' + d.error;
+        }
+      } catch (e) {
+        status.innerText = 'Chyba spojení: ' + e;
+      }
+    }
+
+    async function cleanOrphanFiles() {
+      const status = document.getElementById('crisis-status');
+      if (!confirm('Spustit kontrolu a vyčištění sirotčích souborů v úložišti?')) return;
+      status.innerText = 'Čistím úložiště...';
+      try {
+        const res = await fetch('/api/admin/clean-orphans', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey }
+        });
+        const d = await res.json();
+        if (res.ok) {
+          alert('✓ ' + d.message);
+          status.innerText = '✓ Hotovo';
+          loadData();
+        } else {
+          status.innerText = 'Chyba: ' + d.error;
+        }
+      } catch (e) {
+        status.innerText = 'Chyba spojení: ' + e;
+      }
     }
   </script>
 </body>
